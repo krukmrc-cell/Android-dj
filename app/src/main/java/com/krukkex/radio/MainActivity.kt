@@ -1,9 +1,12 @@
 package com.krukkex.radio
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.webkit.ConsoleMessage
@@ -12,6 +15,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.util.Log
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
@@ -20,6 +24,8 @@ import androidx.core.content.ContextCompat
 class MainActivity : AppCompatActivity() {
 
     private val websiteUrl = "https://krukkex.nl"
+
+    private val notifPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
     // Minimale injectie — de frontend (AudioPlayer.tsx) roept window.AndroidAudio
     // direct aan. Geen prototype-hacks meer nodig.
@@ -31,6 +37,12 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
 
         webView = findViewById(R.id.webView)
         val loadingIndicator = findViewById<View>(R.id.loadingIndicator)
