@@ -74,7 +74,7 @@ class AudioService : MediaSessionService() {
                 currentUrl = url
                 playFresh(url)
             }
-            "PAUSE"  -> player.stop()
+            "PAUSE"  -> player.pause()
             "RESUME" -> currentUrl?.let { playFresh(it) }
             "STOP"   -> { player.stop(); currentUrl = null }
             "TRACK_INFO" -> {

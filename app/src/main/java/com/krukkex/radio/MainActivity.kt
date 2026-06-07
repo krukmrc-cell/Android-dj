@@ -111,7 +111,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        ContextCompat.startForegroundService(this, Intent(this, AudioService::class.java))
         // Synchroniseer frontend UI bij play/pause van buitenaf (hoofdtelefoon, BT)
         AudioService.playStateCallback = { playing ->
             runOnUiThread {
