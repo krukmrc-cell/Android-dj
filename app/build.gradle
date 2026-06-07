@@ -48,6 +48,9 @@ dependencies {
     // WebView
     implementation 'androidx.webkit:webkit:1.10.0'
 
+    // Media notificatie stijl (play/pause knoppen)
+    implementation 'androidx.media:media:1.7.0'
+
     // Coroutines
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
 }

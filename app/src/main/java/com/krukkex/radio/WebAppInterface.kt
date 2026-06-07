@@ -49,6 +49,16 @@ class WebAppInterface(
     }
 
     @JavascriptInterface
+    fun updateTrackInfo(title: String, artist: String, artworkUrl: String) {
+        context.startService(Intent(context, AudioService::class.java).apply {
+            action = "TRACK_INFO"
+            putExtra("title", title)
+            putExtra("artist", artist)
+            putExtra("artworkUrl", artworkUrl)
+        })
+    }
+
+    @JavascriptInterface
     fun setVolume(volume: Float) {
         context.startService(Intent(context, AudioService::class.java).apply {
             action = "VOLUME"
