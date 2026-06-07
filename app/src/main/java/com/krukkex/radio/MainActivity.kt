@@ -107,10 +107,15 @@ class MainActivity : AppCompatActivity() {
 
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val url = request.url.toString()
-                return if (url.startsWith(websiteUrl)) {
+                // Alles van krukkex.nl (incl. www. en subdomeinen) blijft in de WebView
+                return if (url.contains("krukkex.nl")) {
                     false
                 } else {
-                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                    try {
+                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                    } catch (e: Exception) {
+                        Log.w("WebView", "Kon externe URL niet openen: $url")
+                    }
                     true
                 }
             }
