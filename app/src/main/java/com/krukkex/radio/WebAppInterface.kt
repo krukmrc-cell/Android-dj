@@ -1,15 +1,27 @@
 package com.krukkex.radio
 
-import android.content.Context
-import android.content.Intent
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
+/**
+ * De frontend (AudioPlayer.tsx) stuurt afspeelcommando's via deze bridge. Ze worden
+ * doorgegeven aan de MediaController in MainActivity — Media3 regelt zelf de
+ * foreground-notificatie. Geen losse service-intents meer.
+ */
+interface PlaybackController {
+    fun playUrl(url: String)
+    fun pausePlayback()
+    fun resumePlayback()
+    fun stopPlayback()
+    fun setVolume(volume: Float)
+    fun updateMetadata(title: String, artist: String, artworkUrl: String)
+}
+
 class WebAppInterface(
-    private val context: Context,
+    private val controller: PlaybackController,
     private val webView: WebView
 ) {
     @JavascriptInterface
@@ -17,53 +29,36 @@ class WebAppInterface(
 
     @JavascriptInterface
     fun play(url: String) {
-        context.startForegroundService(Intent(context, AudioService::class.java).apply {
-            action = "PLAY"
-            putExtra("url", url)
-        })
+        controller.playUrl(url)
         notifyWebView("playing")
     }
 
     @JavascriptInterface
     fun pause() {
-        context.startService(Intent(context, AudioService::class.java).apply {
-            action = "PAUSE"
-        })
+        controller.pausePlayback()
         notifyWebView("paused")
     }
 
     @JavascriptInterface
     fun resume() {
-        context.startService(Intent(context, AudioService::class.java).apply {
-            action = "RESUME"
-        })
+        controller.resumePlayback()
         notifyWebView("playing")
     }
 
     @JavascriptInterface
     fun stop() {
-        context.startService(Intent(context, AudioService::class.java).apply {
-            action = "STOP"
-        })
+        controller.stopPlayback()
         notifyWebView("stopped")
     }
 
     @JavascriptInterface
     fun updateTrackInfo(title: String, artist: String, artworkUrl: String) {
-        context.startService(Intent(context, AudioService::class.java).apply {
-            action = "TRACK_INFO"
-            putExtra("title", title)
-            putExtra("artist", artist)
-            putExtra("artworkUrl", artworkUrl)
-        })
+        controller.updateMetadata(title, artist, artworkUrl)
     }
 
     @JavascriptInterface
     fun setVolume(volume: Float) {
-        context.startService(Intent(context, AudioService::class.java).apply {
-            action = "VOLUME"
-            putExtra("volume", volume)
-        })
+        controller.setVolume(volume)
     }
 
     private fun notifyWebView(state: String) {

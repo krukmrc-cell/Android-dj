@@ -2,6 +2,7 @@ package com.krukkex.radio
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -17,21 +18,48 @@ import android.webkit.WebViewClient
 import android.util.Log
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.common.Player
+import androidx.media3.session.MediaController
+import androidx.media3.session.SessionToken
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
-import androidx.core.content.ContextCompat
+import com.google.common.util.concurrent.ListenableFuture
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity(), PlaybackController {
 
     private val websiteUrl = "https://krukkex.nl"
 
     private val notifPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
-    // Minimale injectie — de frontend (AudioPlayer.tsx) roept window.AndroidAudio
-    // direct aan. Geen prototype-hacks meer nodig.
+    // Minimale injectie — de frontend (AudioPlayer.tsx) roept window.AndroidAudio direct aan.
     private val audioInterceptScript = "(function(){ window.__krukkexReady = true; })();"
 
     private lateinit var webView: WebView
+
+    // ── Media3 controller ──
+    // De controller verbindt met AudioService (MediaSessionService). Media3 promoveert de
+    // service zelf naar de voorgrond met notificatie zodra er afgespeeld wordt.
+    private var controllerFuture: ListenableFuture<MediaController>? = null
+    private var mediaController: MediaController? = null
+    private var pendingPlayUrl: String? = null
+    private var currentUrl: String? = null
+    private var trackTitle: String = "KrukkexRadio"
+    private var trackArtist: String = ""
+    private var trackArtwork: String = ""
+
+    // Houd de WebView-UI in sync bij play/pause van buitenaf (koptelefoon, BT, notificatie)
+    private val playerListener = object : Player.Listener {
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            val state = if (isPlaying) "playing" else "paused"
+            webView.evaluateJavascript(
+                "window.dispatchEvent(new CustomEvent('nativeAudioState',{detail:{state:'$state'}}))",
+                null
+            )
+        }
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -81,7 +109,7 @@ class MainActivity : AppCompatActivity() {
 
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val url = request.url.toString()
-                // Onderschep native audio commando's via URL scheme
+                // Onderschep native audio commando's via URL scheme (legacy fallback)
                 if (url.startsWith("krukkex://")) {
                     handleNativeScheme(request.url)
                     return true
@@ -112,32 +140,90 @@ class MainActivity : AppCompatActivity() {
         } ?: webView.loadUrl(websiteUrl)
     }
 
-    private fun handleNativeScheme(uri: Uri) {
-        val action = uri.host ?: return
-        val intent = Intent(this, AudioService::class.java).apply {
-            this.action = action.uppercase()
-            uri.getQueryParameter("url")?.let { putExtra("url", it) }
-        }
-        ContextCompat.startForegroundService(this, intent)
-    }
-
+    // ── MediaController lifecycle ──
     override fun onStart() {
         super.onStart()
-        // Synchroniseer frontend UI bij play/pause van buitenaf (hoofdtelefoon, BT)
-        AudioService.playStateCallback = { playing ->
-            runOnUiThread {
-                val state = if (playing) "playing" else "paused"
-                webView.evaluateJavascript(
-                    "window.dispatchEvent(new CustomEvent('nativeAudioState',{detail:{state:'$state'}}))",
-                    null
-                )
-            }
-        }
+        val token = SessionToken(this, ComponentName(this, AudioService::class.java))
+        val future = MediaController.Builder(this, token).buildAsync()
+        controllerFuture = future
+        future.addListener({
+            val controller = try { future.get() } catch (e: Exception) { null }
+            mediaController = controller
+            controller?.addListener(playerListener)
+            // Speel een commando af dat binnenkwam voordat de controller verbonden was
+            pendingPlayUrl?.let { url -> pendingPlayUrl = null; playUrl(url) }
+        }, ContextCompat.getMainExecutor(this))
     }
 
     override fun onStop() {
         super.onStop()
-        AudioService.playStateCallback = null
+        mediaController?.removeListener(playerListener)
+        controllerFuture?.let { MediaController.releaseFuture(it) }
+        controllerFuture = null
+        mediaController = null
+    }
+
+    // ── PlaybackController — alles op de main thread (controller mag alleen daar) ──
+    private fun buildMediaItem(url: String): MediaItem =
+        MediaItem.Builder()
+            .setUri(url)
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(trackTitle)
+                    .setArtist(trackArtist.takeIf { it.isNotBlank() })
+                    .setArtworkUri(trackArtwork.takeIf { it.isNotBlank() }?.let { Uri.parse(it) })
+                    .build()
+            )
+            .build()
+
+    override fun playUrl(url: String) = runOnUiThread {
+        currentUrl = url
+        val c = mediaController
+        if (c == null) {
+            pendingPlayUrl = url
+            return@runOnUiThread
+        }
+        c.setMediaItem(buildMediaItem(url))
+        c.prepare()
+        c.play()
+    }
+
+    override fun pausePlayback() = runOnUiThread {
+        mediaController?.pause()
+    }
+
+    override fun resumePlayback() = runOnUiThread {
+        val c = mediaController ?: return@runOnUiThread
+        if (c.mediaItemCount > 0) c.play() else currentUrl?.let { playUrl(it) }
+    }
+
+    override fun stopPlayback() = runOnUiThread {
+        mediaController?.stop()
+        currentUrl = null
+    }
+
+    override fun setVolume(volume: Float) = runOnUiThread {
+        mediaController?.volume = volume.coerceIn(0f, 1f)
+    }
+
+    override fun updateMetadata(title: String, artist: String, artworkUrl: String) = runOnUiThread {
+        trackTitle = title.takeIf { it.isNotBlank() } ?: "KrukkexRadio"
+        trackArtist = artist
+        trackArtwork = artworkUrl
+        val c = mediaController ?: return@runOnUiThread
+        // Zelfde URL → Media3 herstart de stream NIET, alleen de metadata/notificatie update
+        if (c.mediaItemCount > 0 && currentUrl != null) {
+            c.replaceMediaItem(0, buildMediaItem(currentUrl!!))
+        }
+    }
+
+    private fun handleNativeScheme(uri: Uri) {
+        when (uri.host?.lowercase()) {
+            "play" -> uri.getQueryParameter("url")?.let { playUrl(it) }
+            "pause" -> pausePlayback()
+            "resume" -> resumePlayback()
+            "stop" -> stopPlayback()
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
