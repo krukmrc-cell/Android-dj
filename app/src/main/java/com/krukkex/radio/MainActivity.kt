@@ -18,7 +18,7 @@ import androidx.webkit.WebViewFeature
 
 class MainActivity : AppCompatActivity() {
 
-    private val websiteUrl = "https://stream.krukkex.nl"
+    private val websiteUrl = "https://krukkex.nl"
 
     // Dit script wordt geïnjecteerd in de WebView voor elke pagina.
     // Het onderschept HTMLAudioElement.play() en stuurt het door naar native ExoPlayer.
