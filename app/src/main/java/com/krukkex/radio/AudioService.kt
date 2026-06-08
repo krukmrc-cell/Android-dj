@@ -1,11 +1,16 @@
 package com.krukkex.radio
 
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.Player
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 
@@ -18,6 +23,7 @@ import androidx.media3.session.MediaSessionService
 class AudioService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
+    private var wasPaused = false
 
     override fun onCreate() {
         super.onCreate()
@@ -27,16 +33,48 @@ class AudioService : MediaSessionService() {
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build()
 
-        // Kleine buffer: 1.5s min, 5s max — blijft dicht bij live
+        // Krappe buffer voor lage latency: 1s min, 3s max — zo dicht mogelijk bij live.
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(1500, 5000, 500, 500)
+            .setBufferDurationsMs(1000, 3000, 500, 1000)
             .build()
 
-        val player = ExoPlayer.Builder(this)
+        // Custom renderers: voeg een passthrough-AudioProcessor toe die de PCM aftapt
+        // voor de visualizer (FFT). De audio zelf blijft ongewijzigd.
+        val renderersFactory = object : DefaultRenderersFactory(this) {
+            override fun buildAudioSink(
+                context: Context,
+                enableFloatOutput: Boolean,
+                enableAudioTrackPlaybackParams: Boolean
+            ): AudioSink {
+                return DefaultAudioSink.Builder(context)
+                    .setEnableFloatOutput(enableFloatOutput)
+                    .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                    .setAudioProcessors(arrayOf(FftAudioProcessor()))
+                    .build()
+            }
+        }
+
+        val player = ExoPlayer.Builder(this, renderersFactory)
             .setAudioAttributes(audioAttributes, /* handleAudioFocus= */ true)
             .setLoadControl(loadControl)
             .setHandleAudioBecomingNoisy(true) // pauzeer als koptelefoon wordt losgekoppeld
             .build()
+
+        // Altijd live: bij pauze stopt het bufferen niet eindeloos, en bij hervatten
+        // gooien we de (tijdens pauze opgebouwde) buffer weg en verbinden we opnieuw,
+        // zodat luisteraars nooit achter de live-uitzending aanlopen.
+        player.addListener(object : Player.Listener {
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (!playWhenReady) {
+                    wasPaused = true
+                } else if (wasPaused) {
+                    wasPaused = false
+                    val item = player.currentMediaItem ?: return
+                    player.setMediaItem(item) // reset → verse live verbinding
+                    player.prepare()
+                }
+            }
+        })
 
         mediaSession = MediaSession.Builder(this, player)
             .setSessionActivity(

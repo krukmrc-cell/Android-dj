@@ -50,9 +50,14 @@ class MainActivity : AppCompatActivity(), PlaybackController {
     private var trackArtist: String = ""
     private var trackArtwork: String = ""
 
+    // Leesbaar vanaf de JS-bridge (binder thread) → volatile.
+    @Volatile
+    private var nativePlaying = false
+
     // Houd de WebView-UI in sync bij play/pause van buitenaf (koptelefoon, BT, notificatie)
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
+            nativePlaying = isPlaying
             val state = if (isPlaying) "playing" else "paused"
             webView.evaluateJavascript(
                 "window.dispatchEvent(new CustomEvent('nativeAudioState',{detail:{state:'$state'}}))",
@@ -150,13 +155,29 @@ class MainActivity : AppCompatActivity(), PlaybackController {
             val controller = try { future.get() } catch (e: Exception) { null }
             mediaController = controller
             controller?.addListener(playerListener)
+            // Initialiseer de status zodat de WebView na een remount meteen klopt.
+            nativePlaying = controller?.isPlaying == true
             // Speel een commando af dat binnenkwam voordat de controller verbonden was
             pendingPlayUrl?.let { url -> pendingPlayUrl = null; playUrl(url) }
         }, ContextCompat.getMainExecutor(this))
+
+        // Push FFT-banden uit ExoPlayer naar de WebView voor de visualizer
+        FftAudioProcessor.onBands = { bands ->
+            val json = bands.joinToString(",", "[", "]")
+            runOnUiThread {
+                if (::webView.isInitialized) {
+                    webView.evaluateJavascript(
+                        "window.dispatchEvent(new CustomEvent('nativeAudioFFT',{detail:$json}))",
+                        null
+                    )
+                }
+            }
+        }
     }
 
     override fun onStop() {
         super.onStop()
+        FftAudioProcessor.onBands = null
         mediaController?.removeListener(playerListener)
         controllerFuture?.let { MediaController.releaseFuture(it) }
         controllerFuture = null
@@ -206,6 +227,8 @@ class MainActivity : AppCompatActivity(), PlaybackController {
         mediaController?.volume = volume.coerceIn(0f, 1f)
     }
 
+    override fun isPlaying(): Boolean = nativePlaying
+
     override fun updateMetadata(title: String, artist: String, artworkUrl: String) = runOnUiThread {
         trackTitle = title.takeIf { it.isNotBlank() } ?: "KrukkexRadio"
         trackArtist = artist
@@ -216,6 +239,30 @@ class MainActivity : AppCompatActivity(), PlaybackController {
             c.replaceMediaItem(0, buildMediaItem(currentUrl!!))
         }
     }
+
+    override fun updateMetadataFull(title: String, artist: String, source: String, artworkUrl: String) = runOnUiThread {
+        trackTitle = title.takeIf { it.isNotBlank() } ?: "KrukkexRadio"
+        trackArtist = artist
+        trackArtwork = artworkUrl
+        val c = mediaController ?: return@runOnUiThread
+        // Zelfde URL → Media3 herstart de stream NIET, alleen de metadata/notificatie update
+        if (c.mediaItemCount > 0 && currentUrl != null) {
+            c.replaceMediaItem(0, buildMediaItemFull(currentUrl!!, source))
+        }
+    }
+
+    private fun buildMediaItemFull(url: String, source: String): MediaItem =
+        MediaItem.Builder()
+            .setUri(url)
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(trackTitle)
+                    .setArtist(trackArtist.takeIf { it.isNotBlank() })
+                    .setAlbumTitle(source.takeIf { it.isNotBlank() })  // Source (Live / aanvrager) goes in album
+                    .setArtworkUri(trackArtwork.takeIf { it.isNotBlank() }?.let { Uri.parse(it) })
+                    .build()
+            )
+            .build()
 
     private fun handleNativeScheme(uri: Uri) {
         when (uri.host?.lowercase()) {

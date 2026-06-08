@@ -18,6 +18,8 @@ interface PlaybackController {
     fun stopPlayback()
     fun setVolume(volume: Float)
     fun updateMetadata(title: String, artist: String, artworkUrl: String)
+    fun updateMetadataFull(title: String, artist: String, source: String, artworkUrl: String)
+    fun isPlaying(): Boolean
 }
 
 class WebAppInterface(
@@ -26,6 +28,10 @@ class WebAppInterface(
 ) {
     @JavascriptInterface
     fun isNativeAndroid(): Boolean = true
+
+    /** Of de native speler op dit moment audio afspeelt (voor UI-sync na een remount). */
+    @JavascriptInterface
+    fun isNativePlaying(): Boolean = controller.isPlaying()
 
     @JavascriptInterface
     fun play(url: String) {
@@ -57,8 +63,26 @@ class WebAppInterface(
     }
 
     @JavascriptInterface
+    fun updateTrackInfoFull(title: String, artist: String, source: String, artworkUrl: String) {
+        controller.updateMetadataFull(title, artist, source, artworkUrl)
+    }
+
+    @JavascriptInterface
     fun setVolume(volume: Float) {
         controller.setVolume(volume)
+    }
+
+    @JavascriptInterface
+    fun setEqualizerBand(bandIndex: Int, gainDb: Float) {
+        if (bandIndex in 0..9) {
+            FftAudioProcessor.eqBands[bandIndex] = gainDb.coerceIn(-12f, 12f)
+            FftAudioProcessor.updateFilterBand(bandIndex)
+        }
+    }
+
+    @JavascriptInterface
+    fun getEqualizerBands(): String {
+        return FftAudioProcessor.eqBands.joinToString(",")
     }
 
     private fun notifyWebView(state: String) {
