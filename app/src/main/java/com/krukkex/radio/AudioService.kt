@@ -3,6 +3,10 @@ package com.krukkex.radio
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.os.Handler
+import android.os.Looper
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Player
@@ -19,11 +23,15 @@ import androidx.media3.session.MediaSessionService
  * MainActivity stuurt de speler aan via een MediaController. Media3 beheert daardoor
  * automatisch de foreground-notificatie (met media-knoppen) en de service-lifecycle,
  * zonder de fragiele startForegroundService/5-seconden-deadline.
+ *
+ * Robuust bij netwerkwisseling (WiFi ↔ 4G/5G): monitort connektiviteit en reconnectet automatisch.
  */
 class AudioService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
     private var wasPaused = false
+    private var connectivityCallback: ConnectivityManager.NetworkCallback? = null
+    private val handler = Handler(Looper.getMainLooper())
 
     override fun onCreate() {
         super.onCreate()
@@ -86,6 +94,35 @@ class AudioService : MediaSessionService() {
                 )
             )
             .build()
+
+        // Monitor netwerkveranderingen: bij switch van WiFi ↔ 4G/5G, herverbinden
+        registerNetworkCallback(player)
+    }
+
+    private fun registerNetworkCallback(player: ExoPlayer) {
+        val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        if (connectivityManager != null) {
+            connectivityCallback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    super.onAvailable(network)
+                    handler.post {
+                        // Netwerk beschikbaar → check of we actief spelen en reconnecten nodig is
+                        val currentItem = player.currentMediaItem
+                        if (currentItem != null && !player.isPlaying && player.playWhenReady) {
+                            // Stream is pauzeerend op netwerk, probeer opnieuw
+                            player.prepare()
+                        }
+                    }
+                }
+
+                override fun onLost(network: Network) {
+                    super.onLost(network)
+                    // Geen onmiddellijke actie; ExoPlayer zal bufferen/hervatten
+                    // als het netwerk terugkomt (zie onAvailable)
+                }
+            }
+            connectivityManager.registerDefaultNetworkCallback(connectivityCallback!!)
+        }
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
@@ -99,6 +136,17 @@ class AudioService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        // Zet de network monitoring uit
+        val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        if (connectivityManager != null && connectivityCallback != null) {
+            try {
+                connectivityManager.unregisterNetworkCallback(connectivityCallback!!)
+            } catch (e: Exception) {
+                // Ignore: callback was mogelijk niet geregistreerd
+            }
+        }
+        connectivityCallback = null
+
         mediaSession?.run { player.release(); release() }
         mediaSession = null
         super.onDestroy()

@@ -29,12 +29,28 @@ class FftAudioProcessor : BaseAudioProcessor() {
 
         // 10-band EQ (60Hz, 125Hz, 250Hz, 500Hz, 1kHz, 2kHz, 4kHz, 8kHz, 16kHz)
         // Waarden in dB (-12..+12), IndexOutOfBounds safe.
-        @Volatile
         val eqBands = FloatArray(10)  // initialized to 0
+
+        // 10-band biquad filters (cascade)
+        private val filters = Array(10) { BiquadFilter() }
+        // Frequenties in Hz (exponentieel: 60, 125, 250, 500, 1k, 2k, 4k, 8k, 16k)
+        private val centerFreqs = floatArrayOf(60f, 125f, 250f, 500f, 1000f, 2000f, 4000f, 8000f, 16000f, 20000f)
+        // Per-band Q (butterworth-achtig, licht brede curve)
+        private val qFactors = floatArrayOf(0.8f, 0.8f, 0.8f, 0.8f, 0.8f, 0.8f, 0.8f, 0.8f, 0.8f, 0.8f)
+
+        var sampleRate = 44100
+
+        fun updateFilterBand(bandIndex: Int) {
+            if (bandIndex in 0..9 && sampleRate > 0) {
+                val gainDb = eqBands[bandIndex]
+                val freqHz = centerFreqs[bandIndex]
+                val q = qFactors[bandIndex]
+                filters[bandIndex].setPeakingEQ(freqHz, q, gainDb, sampleRate)
+            }
+        }
     }
 
     private var channelCount = 2
-    private var sampleRate = 44100
     private var analyze = false
 
     private val mono = FloatArray(FFT_SIZE)
@@ -45,13 +61,6 @@ class FftAudioProcessor : BaseAudioProcessor() {
     private val re = FloatArray(FFT_SIZE)
     private val im = FloatArray(FFT_SIZE)
     private var lastEmit = 0L
-
-    // 10-band biquad filters (cascade)
-    private val filters = Array(10) { BiquadFilter() }
-    // Frequenties in Hz (exponentieel: 60, 125, 250, 500, 1k, 2k, 4k, 8k, 16k)
-    private val centerFreqs = floatArrayOf(60f, 125f, 250f, 500f, 1000f, 2000f, 4000f, 8000f, 16000f, 20000f)
-    // Per-band Q (butterworth-achtig, licht brede curve)
-    private val qFactors = floatArrayOf(0.8f, 0.8f, 0.8f, 0.8f, 0.8f, 0.8f, 0.8f, 0.8f, 0.8f, 0.8f)
 
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
         channelCount = inputAudioFormat.channelCount
@@ -67,15 +76,6 @@ class FftAudioProcessor : BaseAudioProcessor() {
     private fun updateEqFilters() {
         for (i in 0 until 10) {
             updateFilterBand(i)
-        }
-    }
-
-    fun updateFilterBand(bandIndex: Int) {
-        if (bandIndex in 0..9 && sampleRate > 0) {
-            val gainDb = eqBands[bandIndex]
-            val freqHz = centerFreqs[bandIndex]
-            val q = qFactors[bandIndex]
-            filters[bandIndex].setPeakingEQ(freqHz, q, gainDb, sampleRate)
         }
     }
 
