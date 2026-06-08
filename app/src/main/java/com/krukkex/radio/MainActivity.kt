@@ -63,6 +63,10 @@ class MainActivity : AppCompatActivity(), PlaybackController {
             castSession = null
         }
 
+        override fun onSessionEnding(session: CastSession) {
+            Log.d("Cast", "Cast session ending")
+        }
+
         override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) {
             Log.d("Cast", "Cast session resumed")
             castSession = session
@@ -245,7 +249,6 @@ class MainActivity : AppCompatActivity(), PlaybackController {
                     .setArtist(trackArtist.ifBlank { "Live Radio" })
                     .setAlbumTitle("KrukkexRadio")
                     .setArtworkUri(trackArtwork.ifBlank { null }?.let { Uri.parse(it) })
-                    .setIsLive(true)
                     .build()
             )
             .build()
@@ -325,7 +328,6 @@ class MainActivity : AppCompatActivity(), PlaybackController {
                     .setArtist(trackArtist.ifBlank { "Live Radio" })
                     .setAlbumTitle(source.ifBlank { "KrukkexRadio" })
                     .setArtworkUri(trackArtwork.ifBlank { null }?.let { Uri.parse(it) })
-                    .setIsLive(true)
                     .build()
             )
             .build()
