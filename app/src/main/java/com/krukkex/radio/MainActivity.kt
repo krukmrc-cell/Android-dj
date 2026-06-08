@@ -21,9 +21,11 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import androidx.mediarouter.app.MediaRouteButton
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
 import com.google.android.gms.cast.framework.CastButtonFactory
@@ -57,38 +59,60 @@ class MainActivity : AppCompatActivity(), PlaybackController {
     // ── Google Cast Framework ──
     private var castContext: CastContext? = null
     private var castSession: CastSession? = null
+    private var mediaRouteButton: MediaRouteButton? = null
     private val castSessionListener = object : SessionManagerListener<CastSession> {
         override fun onSessionEnded(session: CastSession, error: Int) {
             Log.d("Cast", "Cast session ended")
             castSession = null
+            notifyCastState(false)
         }
 
         override fun onSessionEnding(session: CastSession) {
             Log.d("Cast", "Cast session ending")
         }
 
+        override fun onSessionResuming(session: CastSession, sessionId: String) {
+            Log.d("Cast", "Cast session resuming: $sessionId")
+        }
+
         override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) {
             Log.d("Cast", "Cast session resumed")
             castSession = session
             updateCastMetadata()
+            notifyCastState(true)
         }
 
         override fun onSessionResumeFailed(session: CastSession, error: Int) {
             Log.d("Cast", "Cast session resume failed: $error")
+            notifyCastState(false)
         }
 
         override fun onSessionStarted(session: CastSession, sessionId: String) {
             Log.d("Cast", "Cast session started: $sessionId")
             castSession = session
             updateCastMetadata()
+            notifyCastState(true)
         }
 
         override fun onSessionStartFailed(session: CastSession, error: Int) {
             Log.d("Cast", "Cast session start failed: $error")
+            notifyCastState(false)
         }
 
         override fun onSessionSuspended(session: CastSession, reason: Int) {
             Log.d("Cast", "Cast session suspended")
+        }
+    }
+
+    // Stuur de cast-verbindingsstatus naar de WebView zodat de castknop klopt.
+    private fun notifyCastState(connected: Boolean) {
+        runOnUiThread {
+            if (::webView.isInitialized) {
+                webView.evaluateJavascript(
+                    "window.dispatchEvent(new CustomEvent('nativeCastState',{detail:{connected:$connected}}))",
+                    null
+                )
+            }
         }
     }
 
@@ -116,6 +140,11 @@ class MainActivity : AppCompatActivity(), PlaybackController {
         // Initialize Google Cast Framework
         try {
             castContext = CastContext.getSharedInstance(this)
+            // Koppel de (onzichtbare) cast-knop: hierdoor weet het Cast-framework de
+            // beschikbare apparaten en opent performClick() de juiste device-dialog.
+            mediaRouteButton = findViewById<MediaRouteButton>(R.id.mediaRouteButton).also {
+                CastButtonFactory.setUpMediaRouteButton(applicationContext, it)
+            }
         } catch (e: Exception) {
             Log.w("Cast", "Cast Framework not available: ${e.message}")
         }
@@ -243,6 +272,7 @@ class MainActivity : AppCompatActivity(), PlaybackController {
     private fun buildMediaItem(url: String): MediaItem =
         MediaItem.Builder()
             .setUri(url)
+            .setMimeType(MimeTypes.AUDIO_MPEG) // nodig zodat CastPlayer de stream accepteert
             .setMediaMetadata(
                 MediaMetadata.Builder()
                     .setTitle(trackTitle.ifBlank { "KrukkexRadio" })
@@ -285,19 +315,32 @@ class MainActivity : AppCompatActivity(), PlaybackController {
 
     override fun isPlaying(): Boolean = nativePlaying
 
+    // Open de native Cast device-picker (of de controller-dialog als er al gecast wordt).
+    // De WebView-castknop roept dit aan via de bridge.
+    override fun startCast() = runOnUiThread {
+        val button = mediaRouteButton
+        if (button == null) {
+            Log.w("Cast", "Cast-knop niet beschikbaar")
+            return@runOnUiThread
+        }
+        button.performClick()
+    }
+
     override fun updateMetadata(title: String, artist: String, artworkUrl: String) = runOnUiThread {
         trackTitle = title.takeIf { it.isNotBlank() } ?: "KrukkexRadio"
         trackArtist = artist.takeIf { it.isNotBlank() } ?: ""
         trackArtwork = artworkUrl.takeIf { it.isNotBlank() } ?: ""
         val c = mediaController ?: return@runOnUiThread
 
-        // Update metadata → Chromecast real-time
+        // Update metadata zonder de stream te herladen (naadloos bij gelijke URL → geen
+        // gap, ook niet op de Chromecast). Alleen bij een nieuwe/lege speler echt laden.
         if (currentUrl != null) {
-            c.setMediaItem(buildMediaItem(currentUrl!!), false)
+            if (c.mediaItemCount > 0) {
+                c.replaceMediaItem(c.currentMediaItemIndex, buildMediaItem(currentUrl!!))
+            } else {
+                c.setMediaItem(buildMediaItem(currentUrl!!), false)
+            }
         }
-
-        // Update Cast metadata
-        updateCastMetadata()
 
         Log.d("Android Audio", "Metadata: $trackTitle - $trackArtist (artwork: ${trackArtwork.take(50)}...)")
     }
@@ -308,13 +351,15 @@ class MainActivity : AppCompatActivity(), PlaybackController {
         trackArtwork = artworkUrl.takeIf { it.isNotBlank() } ?: ""
         val c = mediaController ?: return@runOnUiThread
 
-        // Update metadata → Chromecast real-time
+        // Update metadata zonder de stream te herladen (naadloos bij gelijke URL → geen
+        // gap, ook niet op de Chromecast). Alleen bij een nieuwe/lege speler echt laden.
         if (currentUrl != null) {
-            c.setMediaItem(buildMediaItemFull(currentUrl!!, source), false)
+            if (c.mediaItemCount > 0) {
+                c.replaceMediaItem(c.currentMediaItemIndex, buildMediaItemFull(currentUrl!!, source))
+            } else {
+                c.setMediaItem(buildMediaItemFull(currentUrl!!, source), false)
+            }
         }
-
-        // Update Cast metadata
-        updateCastMetadata()
 
         Log.d("Android Audio", "Metadata (full): $trackTitle - $trackArtist | $source")
     }
@@ -322,6 +367,7 @@ class MainActivity : AppCompatActivity(), PlaybackController {
     private fun buildMediaItemFull(url: String, source: String): MediaItem =
         MediaItem.Builder()
             .setUri(url)
+            .setMimeType(MimeTypes.AUDIO_MPEG) // nodig zodat CastPlayer de stream accepteert
             .setMediaMetadata(
                 MediaMetadata.Builder()
                     .setTitle(trackTitle.ifBlank { "KrukkexRadio" })

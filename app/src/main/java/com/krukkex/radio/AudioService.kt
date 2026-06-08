@@ -7,7 +7,12 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Handler
 import android.os.Looper
+import androidx.media3.cast.CastPlayer
+import androidx.media3.cast.DefaultMediaItemConverter
+import androidx.media3.cast.MediaItemConverter
+import androidx.media3.cast.SessionAvailabilityListener
 import androidx.media3.common.AudioAttributes
+import androidx.media3.common.MediaItem
 import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -17,6 +22,9 @@ import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import com.google.android.gms.cast.MediaInfo
+import com.google.android.gms.cast.MediaQueueItem
+import com.google.android.gms.cast.framework.CastContext
 
 /**
  * Pure Media3 MediaSessionService. De service zelf bevat geen play/pause-logica meer:
@@ -29,9 +37,34 @@ import androidx.media3.session.MediaSessionService
 class AudioService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
+    private var exoPlayer: ExoPlayer? = null
+    private var castPlayer: CastPlayer? = null
     private var wasPaused = false
     private var connectivityCallback: ConnectivityManager.NetworkCallback? = null
     private val handler = Handler(Looper.getMainLooper())
+
+    // Markeer de cast-stream als LIVE zodat de Chromecast geen (zinloze) voortgangsbalk
+    // toont. Verder identiek aan DefaultMediaItemConverter (incl. customData voor de
+    // round-trip), zodat CastPlayer de queue-items correct kan terugvertalen.
+    private val liveMediaItemConverter = object : MediaItemConverter {
+        private val delegate = DefaultMediaItemConverter()
+        override fun toMediaItem(mediaQueueItem: MediaQueueItem): MediaItem =
+            delegate.toMediaItem(mediaQueueItem)
+
+        override fun toMediaQueueItem(mediaItem: MediaItem): MediaQueueItem {
+            val base = delegate.toMediaQueueItem(mediaItem)
+            val info = base.media ?: return base
+            val liveInfo = MediaInfo.Builder(info.contentId)
+                .setStreamType(MediaInfo.STREAM_TYPE_LIVE)
+                .setContentType(info.contentType)
+                .setMetadata(info.metadata)
+                .setCustomData(info.customData)
+                .build()
+            return MediaQueueItem.Builder(liveInfo)
+                .setAutoplay(base.autoplay)
+                .build()
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -67,6 +100,7 @@ class AudioService : MediaSessionService() {
             .setLoadControl(loadControl)
             .setHandleAudioBecomingNoisy(true) // pauzeer als koptelefoon wordt losgekoppeld
             .build()
+        exoPlayer = player
 
         // Altijd live: bij pauze stopt het bufferen niet eindeloos, en bij hervatten
         // gooien we de (tijdens pauze opgebouwde) buffer weg en verbinden we opnieuw,
@@ -95,8 +129,55 @@ class AudioService : MediaSessionService() {
             )
             .build()
 
+        // ── Chromecast: CastPlayer naast de ExoPlayer ──
+        // Zodra er een cast-sessie beschikbaar is, neemt de CastPlayer de MediaSession
+        // over (audio gaat naar de TV); bij verbreken valt de ExoPlayer weer in (lokaal).
+        try {
+            val ctx = CastContext.getSharedInstance(this)
+            val cast = CastPlayer(ctx, liveMediaItemConverter)
+            cast.setSessionAvailabilityListener(object : SessionAvailabilityListener {
+                override fun onCastSessionAvailable() {
+                    setCurrentPlayer(cast)
+                }
+
+                override fun onCastSessionUnavailable() {
+                    setCurrentPlayer(player)
+                }
+            })
+            castPlayer = cast
+            // Als de app start terwijl er al gecast wordt, meteen overschakelen.
+            if (cast.isCastSessionAvailable) setCurrentPlayer(cast)
+        } catch (e: Exception) {
+            android.util.Log.w("Cast", "CastPlayer niet beschikbaar: ${e.message}")
+        }
+
         // Monitor netwerkveranderingen: bij switch van WiFi ↔ 4G/5G, herverbinden
         registerNetworkCallback(player)
+    }
+
+    /**
+     * Wissel de actieve speler van de MediaSession (ExoPlayer ↔ CastPlayer) en draag
+     * het huidige item + play-intentie over. Voor een live-stream is positie irrelevant.
+     */
+    private fun setCurrentPlayer(player: Player) {
+        val session = mediaSession ?: return
+        val previous = session.player
+        if (previous === player) return
+
+        val currentItem = previous.currentMediaItem
+        val playWhenReady = previous.playWhenReady
+
+        // Stop de vorige speler (niet releasen — we hergebruiken hem bij terugschakelen).
+        previous.stop()
+        previous.clearMediaItems()
+
+        session.player = player
+
+        if (currentItem != null) {
+            player.setMediaItem(currentItem)
+            player.playWhenReady = playWhenReady
+            player.prepare()
+        }
     }
 
     private fun registerNetworkCallback(player: ExoPlayer) {
@@ -147,7 +228,12 @@ class AudioService : MediaSessionService() {
         }
         connectivityCallback = null
 
-        mediaSession?.run { player.release(); release() }
+        castPlayer?.setSessionAvailabilityListener(null)
+        castPlayer?.release()
+        castPlayer = null
+        exoPlayer?.release()
+        exoPlayer = null
+        mediaSession?.release()
         mediaSession = null
         super.onDestroy()
     }

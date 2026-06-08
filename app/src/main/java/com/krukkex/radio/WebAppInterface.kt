@@ -20,6 +20,7 @@ interface PlaybackController {
     fun updateMetadata(title: String, artist: String, artworkUrl: String)
     fun updateMetadataFull(title: String, artist: String, source: String, artworkUrl: String)
     fun isPlaying(): Boolean
+    fun startCast()
 }
 
 class WebAppInterface(
@@ -32,6 +33,12 @@ class WebAppInterface(
     /** Of de native speler op dit moment audio afspeelt (voor UI-sync na een remount). */
     @JavascriptInterface
     fun isNativePlaying(): Boolean = controller.isPlaying()
+
+    /** Open de native Chromecast device-picker. */
+    @JavascriptInterface
+    fun startCast() {
+        controller.startCast()
+    }
 
     @JavascriptInterface
     fun play(url: String) {

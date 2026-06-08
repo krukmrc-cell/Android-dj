@@ -44,6 +44,8 @@ dependencies {
     // ExoPlayer (Media3) — 1.4.x bevat fixes voor foreground-service crashes
     implementation 'androidx.media3:media3-exoplayer:1.4.1'
     implementation 'androidx.media3:media3-session:1.4.1'
+    // CastPlayer — routeert Media3-playback naar een Chromecast
+    implementation 'androidx.media3:media3-cast:1.4.1'
 
     // WebView
     implementation 'androidx.webkit:webkit:1.10.0'
