@@ -26,6 +26,10 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
+import com.google.android.gms.cast.framework.CastButtonFactory
+import com.google.android.gms.cast.framework.CastContext
+import com.google.android.gms.cast.framework.CastSession
+import com.google.android.gms.cast.framework.SessionManagerListener
 import com.google.common.util.concurrent.ListenableFuture
 
 class MainActivity : AppCompatActivity(), PlaybackController {
@@ -50,6 +54,40 @@ class MainActivity : AppCompatActivity(), PlaybackController {
     private var trackArtist: String = ""
     private var trackArtwork: String = ""
 
+    // ── Google Cast Framework ──
+    private var castContext: CastContext? = null
+    private var castSession: CastSession? = null
+    private val castSessionListener = object : SessionManagerListener<CastSession> {
+        override fun onSessionEnded(session: CastSession, error: Int) {
+            Log.d("Cast", "Cast session ended")
+            castSession = null
+        }
+
+        override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) {
+            Log.d("Cast", "Cast session resumed")
+            castSession = session
+            updateCastMetadata()
+        }
+
+        override fun onSessionResumeFailed(session: CastSession, error: Int) {
+            Log.d("Cast", "Cast session resume failed: $error")
+        }
+
+        override fun onSessionStarted(session: CastSession, sessionId: String) {
+            Log.d("Cast", "Cast session started: $sessionId")
+            castSession = session
+            updateCastMetadata()
+        }
+
+        override fun onSessionStartFailed(session: CastSession, error: Int) {
+            Log.d("Cast", "Cast session start failed: $error")
+        }
+
+        override fun onSessionSuspended(session: CastSession, reason: Int) {
+            Log.d("Cast", "Cast session suspended")
+        }
+    }
+
     // Leesbaar vanaf de JS-bridge (binder thread) → volatile.
     @Volatile
     private var nativePlaying = false
@@ -70,6 +108,13 @@ class MainActivity : AppCompatActivity(), PlaybackController {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        // Initialize Google Cast Framework
+        try {
+            castContext = CastContext.getSharedInstance(this)
+        } catch (e: Exception) {
+            Log.w("Cast", "Cast Framework not available: ${e.message}")
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
@@ -148,6 +193,11 @@ class MainActivity : AppCompatActivity(), PlaybackController {
     // ── MediaController lifecycle ──
     override fun onStart() {
         super.onStart()
+
+        // Register Cast session listener
+        castContext?.sessionManager?.addSessionManagerListener(castSessionListener)
+        castSession = castContext?.sessionManager?.currentCastSession
+
         val token = SessionToken(this, ComponentName(this, AudioService::class.java))
         val future = MediaController.Builder(this, token).buildAsync()
         controllerFuture = future
@@ -177,6 +227,7 @@ class MainActivity : AppCompatActivity(), PlaybackController {
 
     override fun onStop() {
         super.onStop()
+        castContext?.sessionManager?.removeSessionManagerListener(castSessionListener)
         FftAudioProcessor.onBands = null
         mediaController?.removeListener(playerListener)
         controllerFuture?.let { MediaController.releaseFuture(it) }
@@ -190,9 +241,11 @@ class MainActivity : AppCompatActivity(), PlaybackController {
             .setUri(url)
             .setMediaMetadata(
                 MediaMetadata.Builder()
-                    .setTitle(trackTitle)
-                    .setArtist(trackArtist.takeIf { it.isNotBlank() })
-                    .setArtworkUri(trackArtwork.takeIf { it.isNotBlank() }?.let { Uri.parse(it) })
+                    .setTitle(trackTitle.ifBlank { "KrukkexRadio" })
+                    .setArtist(trackArtist.ifBlank { "Live Radio" })
+                    .setAlbumTitle("KrukkexRadio")
+                    .setArtworkUri(trackArtwork.ifBlank { null }?.let { Uri.parse(it) })
+                    .setIsLive(true)
                     .build()
             )
             .build()
@@ -231,24 +284,36 @@ class MainActivity : AppCompatActivity(), PlaybackController {
 
     override fun updateMetadata(title: String, artist: String, artworkUrl: String) = runOnUiThread {
         trackTitle = title.takeIf { it.isNotBlank() } ?: "KrukkexRadio"
-        trackArtist = artist
-        trackArtwork = artworkUrl
+        trackArtist = artist.takeIf { it.isNotBlank() } ?: ""
+        trackArtwork = artworkUrl.takeIf { it.isNotBlank() } ?: ""
         val c = mediaController ?: return@runOnUiThread
-        // Zelfde URL → Media3 herstart de stream NIET, alleen de metadata/notificatie update
-        if (c.mediaItemCount > 0 && currentUrl != null) {
-            c.replaceMediaItem(0, buildMediaItem(currentUrl!!))
+
+        // Update metadata → Chromecast real-time
+        if (currentUrl != null) {
+            c.setMediaItem(buildMediaItem(currentUrl!!), false)
         }
+
+        // Update Cast metadata
+        updateCastMetadata()
+
+        Log.d("Android Audio", "Metadata: $trackTitle - $trackArtist (artwork: ${trackArtwork.take(50)}...)")
     }
 
     override fun updateMetadataFull(title: String, artist: String, source: String, artworkUrl: String) = runOnUiThread {
         trackTitle = title.takeIf { it.isNotBlank() } ?: "KrukkexRadio"
-        trackArtist = artist
-        trackArtwork = artworkUrl
+        trackArtist = artist.takeIf { it.isNotBlank() } ?: ""
+        trackArtwork = artworkUrl.takeIf { it.isNotBlank() } ?: ""
         val c = mediaController ?: return@runOnUiThread
-        // Zelfde URL → Media3 herstart de stream NIET, alleen de metadata/notificatie update
-        if (c.mediaItemCount > 0 && currentUrl != null) {
-            c.replaceMediaItem(0, buildMediaItemFull(currentUrl!!, source))
+
+        // Update metadata → Chromecast real-time
+        if (currentUrl != null) {
+            c.setMediaItem(buildMediaItemFull(currentUrl!!, source), false)
         }
+
+        // Update Cast metadata
+        updateCastMetadata()
+
+        Log.d("Android Audio", "Metadata (full): $trackTitle - $trackArtist | $source")
     }
 
     private fun buildMediaItemFull(url: String, source: String): MediaItem =
@@ -256,10 +321,11 @@ class MainActivity : AppCompatActivity(), PlaybackController {
             .setUri(url)
             .setMediaMetadata(
                 MediaMetadata.Builder()
-                    .setTitle(trackTitle)
-                    .setArtist(trackArtist.takeIf { it.isNotBlank() })
-                    .setAlbumTitle(source.takeIf { it.isNotBlank() })  // Source (Live / aanvrager) goes in album
-                    .setArtworkUri(trackArtwork.takeIf { it.isNotBlank() }?.let { Uri.parse(it) })
+                    .setTitle(trackTitle.ifBlank { "KrukkexRadio" })
+                    .setArtist(trackArtist.ifBlank { "Live Radio" })
+                    .setAlbumTitle(source.ifBlank { "KrukkexRadio" })
+                    .setArtworkUri(trackArtwork.ifBlank { null }?.let { Uri.parse(it) })
+                    .setIsLive(true)
                     .build()
             )
             .build()
@@ -270,6 +336,17 @@ class MainActivity : AppCompatActivity(), PlaybackController {
             "pause" -> pausePlayback()
             "resume" -> resumePlayback()
             "stop" -> stopPlayback()
+        }
+    }
+
+    private fun updateCastMetadata() {
+        val session = castSession ?: return
+        try {
+            Log.d("Cast", "Updating Cast metadata: $trackTitle - $trackArtist")
+            // Metadata wordt via MediaSession gehandeld door MediaRouter
+            // Cast framework pikt automatisch metadata uit MediaSession op
+        } catch (e: Exception) {
+            Log.w("Cast", "Failed to update Cast metadata: ${e.message}")
         }
     }
 

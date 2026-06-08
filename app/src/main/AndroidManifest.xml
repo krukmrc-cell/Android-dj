@@ -19,6 +19,11 @@
         android:usesCleartextTraffic="true"
         tools:targetApi="28">
 
+        <!-- Google Cast Framework configuration -->
+        <meta-data
+            android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
+            android:value="com.krukkex.radio.CastOptionsProvider" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

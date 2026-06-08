@@ -53,4 +53,10 @@ dependencies {
 
     // Coroutines
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+
+    // Google Cast Framework — Native Chromecast support
+    implementation 'com.google.android.gms:play-services-cast-framework:21.3.0'
+
+    // MediaRouter — Device discovery & session management
+    implementation 'androidx.mediarouter:mediarouter:1.6.0'
 }
