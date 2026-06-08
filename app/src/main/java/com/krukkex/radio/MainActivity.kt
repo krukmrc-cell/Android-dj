@@ -232,7 +232,7 @@ class MainActivity : AppCompatActivity(), PlaybackController {
         super.onStart()
 
         // Register Cast session listener
-        castContext?.sessionManager?.addSessionManagerListener(castSessionListener)
+        castContext?.sessionManager?.addSessionManagerListener(castSessionListener, CastSession::class.java)
         castSession = castContext?.sessionManager?.currentCastSession
 
         val token = SessionToken(this, ComponentName(this, AudioService::class.java))
@@ -264,7 +264,7 @@ class MainActivity : AppCompatActivity(), PlaybackController {
 
     override fun onStop() {
         super.onStop()
-        castContext?.sessionManager?.removeSessionManagerListener(castSessionListener)
+        castContext?.sessionManager?.removeSessionManagerListener(castSessionListener, CastSession::class.java)
         FftAudioProcessor.onBands = null
         mediaController?.removeListener(playerListener)
         controllerFuture?.let { MediaController.releaseFuture(it) }
