@@ -87,6 +87,10 @@ class MainActivity : AppCompatActivity(), PlaybackController {
             notifyCastState(false)
         }
 
+        override fun onSessionStarting(session: CastSession) {
+            Log.d("Cast", "Cast session starting")
+        }
+
         override fun onSessionStarted(session: CastSession, sessionId: String) {
             Log.d("Cast", "Cast session started: $sessionId")
             castSession = session
