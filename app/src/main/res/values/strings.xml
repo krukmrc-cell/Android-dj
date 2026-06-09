@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">KrukkexRadio</string>
+    <string name="app_name">KrukkeX Radio</string>
+    <string name="widget_label">KrukkeX Radio speler</string>
+    <string name="widget_label_dark">KrukkeX Radio speler (zwart)</string>
+    <string name="widget_label_light">KrukkeX Radio speler (wit)</string>
 </resources>

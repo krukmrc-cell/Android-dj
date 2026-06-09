@@ -9,6 +9,7 @@ import kotlin.math.hypot
 import kotlin.math.log10
 import kotlin.math.pow
 import kotlin.math.sin
+import kotlin.math.tanh
 
 /**
  * Passthrough audio-processor die de PCM-stream van ExoPlayer aftapt, een FFT uitvoert en
@@ -22,6 +23,8 @@ class FftAudioProcessor : BaseAudioProcessor() {
         private const val FFT_SIZE = 1024
         private const val BANDS = 32
         private const val MIN_FRAME_INTERVAL_MS = 40L // ~25 fps
+        // Drempel waarboven de soft-clip-knie ingrijpt (laat normale audio ongemoeid).
+        private const val SOFT_CLIP_THRESHOLD = 0.9f
 
         // Wordt door MainActivity gezet zodat de banden naar de WebView gepusht worden.
         @Volatile
@@ -31,8 +34,12 @@ class FftAudioProcessor : BaseAudioProcessor() {
         // Waarden in dB (-12..+12), IndexOutOfBounds safe.
         val eqBands = FloatArray(10)  // initialized to 0
 
-        // 10-band biquad filters (cascade)
-        private val filters = Array(10) { BiquadFilter() }
+        // Aantal kanalen waarvoor we aparte filter-banken bijhouden (stereo).
+        private const val MAX_EQ_CHANNELS = 2
+        // 10-band biquad filters (cascade) — PER KANAAL. Een biquad heeft interne state
+        // (y1/y2); links en rechts moeten daarom hun eigen filter-instanties hebben,
+        // anders vervuilen ze elkaars state en wordt maar één kanaal correct gefilterd.
+        private val filters = Array(MAX_EQ_CHANNELS) { Array(10) { BiquadFilter() } }
         // Frequenties in Hz (exponentieel: 60, 125, 250, 500, 1k, 2k, 4k, 8k, 16k)
         private val centerFreqs = floatArrayOf(60f, 125f, 250f, 500f, 1000f, 2000f, 4000f, 8000f, 16000f, 20000f)
         // Per-band Q (butterworth-achtig, licht brede curve)
@@ -45,7 +52,10 @@ class FftAudioProcessor : BaseAudioProcessor() {
                 val gainDb = eqBands[bandIndex]
                 val freqHz = centerFreqs[bandIndex]
                 val q = qFactors[bandIndex]
-                filters[bandIndex].setPeakingEQ(freqHz, q, gainDb, sampleRate)
+                // Zelfde coëfficiënten voor elk kanaal (alleen de filter-state verschilt).
+                for (ch in 0 until MAX_EQ_CHANNELS) {
+                    filters[ch][bandIndex].setPeakingEQ(freqHz, q, gainDb, sampleRate)
+                }
             }
         }
     }
@@ -113,25 +123,31 @@ class FftAudioProcessor : BaseAudioProcessor() {
         val endPos = buffer.limit()
         var pos = startPos
 
-        val samples = FloatArray(channelCount)
         while (pos + frameSize <= endPos) {
-            // Read samples (16-bit little-endian)
+            // Filter ELK kanaal afzonderlijk door zijn eigen filter-bank en schrijf het
+            // resultaat terug op de juiste positie (anders blijft rechts ongefilterd).
             for (ch in 0 until channelCount) {
-                val lo = buffer.get(pos + ch * 2).toInt() and 0xFF
-                val hi = buffer.get(pos + ch * 2 + 1).toInt() // sign-extended
-                samples[ch] = ((hi shl 8) or lo).toFloat() / 32768f
-            }
+                val sampleOffset = pos + ch * 2
+                val lo = buffer.get(sampleOffset).toInt() and 0xFF
+                val hi = buffer.get(sampleOffset + 1).toInt() // sign-extended
+                var sample = ((hi shl 8) or lo).toFloat() / 32768f
 
-            // Apply cascade of 10 peaking EQ filters
-            var sample = samples[0]
-            for (i in 0 until 10) {
-                sample = filters[i].process(sample)
-            }
+                val chFilters = filters[ch.coerceAtMost(MAX_EQ_CHANNELS - 1)]
+                for (i in 0 until 10) {
+                    sample = chFilters[i].process(sample)
+                }
 
-            // Write back (average back to 16-bit range, clamp)
-            val output = (sample * 32768f).toInt().coerceIn(-32768, 32767).toShort()
-            buffer.put(pos, (output.toInt() and 0xFF).toByte())
-            buffer.put(pos + 1, ((output.toInt() shr 8) and 0xFF).toByte())
+                // Soft-clip: bij het optellen van meerdere geboostte banden kan het
+                // signaal boven full-scale uitkomen. Een zachte tanh-knie boven 0.9
+                // voorkomt harde digitale clipping (= hoorbare vervorming) terwijl
+                // normale niveaus exact lineair (transparant) blijven.
+                sample = softClip(sample)
+
+                // Write back (clamp als laatste vangnet voor het randgeval ±1.0)
+                val out = (sample * 32768f).toInt().coerceIn(-32768, 32767)
+                buffer.put(sampleOffset, (out and 0xFF).toByte())
+                buffer.put(sampleOffset + 1, ((out shr 8) and 0xFF).toByte())
+            }
 
             pos += frameSize
         }
@@ -140,11 +156,29 @@ class FftAudioProcessor : BaseAudioProcessor() {
 
     override fun onFlush() {
         monoWritten = 0
+        resetFilterState()
     }
 
     override fun onReset() {
         monoWritten = 0
         lastEmit = 0
+        resetFilterState()
+    }
+
+    private fun resetFilterState() {
+        for (ch in 0 until MAX_EQ_CHANNELS) {
+            for (i in 0 until 10) filters[ch][i].reset()
+        }
+    }
+
+    /** Zachte saturatie boven ±[SOFT_CLIP_THRESHOLD]; daaronder exact lineair. */
+    private fun softClip(x: Float): Float {
+        val t = SOFT_CLIP_THRESHOLD
+        return when {
+            x > t -> t + (1f - t) * tanh((x - t) / (1f - t))
+            x < -t -> -t + (1f - t) * tanh((x + t) / (1f - t))
+            else -> x
+        }
     }
 
     private fun accumulate(buffer: ByteBuffer, start: Int, size: Int) {
@@ -264,7 +298,11 @@ class BiquadFilter {
 
     fun setPeakingEQ(freqHz: Float, q: Float, gainDb: Float, sampleRate: Int) {
         val a = 10f.pow(gainDb / 40f) // Peaking EQ amplitude
-        val w0 = 2f * Math.PI.toFloat() * freqHz / sampleRate
+        // Houd de center-frequentie weg van Nyquist (0.45·fs): RBJ peaking-filters
+        // worden vlak onder Nyquist instabiel/onnauwkeurig ("cramping"). Bij 44,1 kHz
+        // landt de 20 kHz-band zo op ~19,8 kHz — onhoorbaar, maar numeriek stabiel.
+        val f = freqHz.coerceAtMost(sampleRate * 0.45f)
+        val w0 = 2f * Math.PI.toFloat() * f / sampleRate
         val sinW0 = sin(w0)
         val cosW0 = cos(w0)
         val alpha = sinW0 / (2f * q)

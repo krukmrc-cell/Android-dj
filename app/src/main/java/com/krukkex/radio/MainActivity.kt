@@ -9,8 +9,10 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.View
 import android.webkit.ConsoleMessage
+import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
@@ -18,6 +20,7 @@ import android.webkit.WebViewClient
 import android.util.Log
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -33,12 +36,35 @@ import com.google.android.gms.cast.framework.CastContext
 import com.google.android.gms.cast.framework.CastSession
 import com.google.android.gms.cast.framework.SessionManagerListener
 import com.google.common.util.concurrent.ListenableFuture
+import com.google.firebase.messaging.FirebaseMessaging
 
 class MainActivity : AppCompatActivity(), PlaybackController {
 
     private val websiteUrl = "https://krukkex.nl"
 
     private val notifPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+
+    // ── Microfoon (soundboard) ──
+    // De WebView vraagt mic-toegang via getUserMedia → onPermissionRequest. We houden
+    // die request vast terwijl we de Android runtime-permissie aanvragen en granten/
+    // weigeren hem op basis van de uitkomst.
+    private var pendingPermissionRequest: PermissionRequest? = null
+    private val micPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        val request = pendingPermissionRequest
+        pendingPermissionRequest = null
+        if (request == null) return@registerForActivityResult
+        if (granted) {
+            request.grant(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+        } else {
+            request.deny()
+            // Permanent geweigerd ("niet meer vragen"): dan toont het systeem geen dialoog
+            // meer. Stuur de gebruiker naar de app-instellingen zodat de mic alsnog aan kan —
+            // anders zou de "Mic toestaan"-knop niets meer kunnen doen.
+            if (!ActivityCompat.shouldShowRequestPermissionRationale(this, Manifest.permission.RECORD_AUDIO)) {
+                openAppSettings()
+            }
+        }
+    }
 
     // Minimale injectie — de frontend (AudioPlayer.tsx) roept window.AndroidAudio direct aan.
     private val audioInterceptScript = "(function(){ window.__krukkexReady = true; })();"
@@ -52,7 +78,7 @@ class MainActivity : AppCompatActivity(), PlaybackController {
     private var mediaController: MediaController? = null
     private var pendingPlayUrl: String? = null
     private var currentUrl: String? = null
-    private var trackTitle: String = "KrukkexRadio"
+    private var trackTitle: String = "KrukkeX Radio"
     private var trackArtist: String = ""
     private var trackArtwork: String = ""
 
@@ -120,6 +146,43 @@ class MainActivity : AppCompatActivity(), PlaybackController {
         }
     }
 
+    // Haal het FCM-token op en geef het door aan de WebView. De frontend
+    // (NativePushRegistrar) registreert het via de socket bij de backend.
+    private fun pushFcmTokenToWeb() {
+        FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+            if (!task.isSuccessful) {
+                Log.w("Push", "FCM-token ophalen mislukt", task.exception)
+                return@addOnCompleteListener
+            }
+            val token = task.result ?: return@addOnCompleteListener
+            getSharedPreferences(KrukkexMessagingService.PREFS, MODE_PRIVATE)
+                .edit().putString(KrukkexMessagingService.KEY_TOKEN, token).apply()
+            runOnUiThread {
+                if (::webView.isInitialized) {
+                    val safe = token.replace("\\", "\\\\").replace("'", "\\'")
+                    webView.evaluateJavascript(
+                        "window.__krukkexPushToken='$safe';" +
+                        "window.dispatchEvent(new CustomEvent('nativePushToken',{detail:{token:'$safe'}}));",
+                        null
+                    )
+                }
+            }
+        }
+    }
+
+    // Stuur een druk op de native vorige/volgende knop naar de WebView. De frontend
+    // (stream-page) beslist wat een skip betekent (admin-skip, stem-skip, etc.).
+    private fun dispatchNativeSkip(direction: String) {
+        runOnUiThread {
+            if (::webView.isInitialized) {
+                webView.evaluateJavascript(
+                    "window.dispatchEvent(new CustomEvent('nativeSkip',{detail:{direction:'$direction'}}))",
+                    null
+                )
+            }
+        }
+    }
+
     // Leesbaar vanaf de JS-bridge (binder thread) → volatile.
     @Volatile
     private var nativePlaying = false
@@ -159,6 +222,9 @@ class MainActivity : AppCompatActivity(), PlaybackController {
             notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
 
+        // Notificatiekanaal voor push-meldingen aanmaken
+        KrukkexMessagingService.ensureChannel(this)
+
         webView = findViewById(R.id.webView)
         val loadingIndicator = findViewById<View>(R.id.loadingIndicator)
 
@@ -192,6 +258,7 @@ class MainActivity : AppCompatActivity(), PlaybackController {
             override fun onPageFinished(view: WebView, url: String) {
                 loadingIndicator.visibility = View.GONE
                 view.evaluateJavascript(audioInterceptScript, null)
+                pushFcmTokenToWeb()
             }
 
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -218,6 +285,28 @@ class MainActivity : AppCompatActivity(), PlaybackController {
             override fun onConsoleMessage(message: ConsoleMessage): Boolean {
                 Log.d("WebView", message.message())
                 return true
+            }
+
+            // De soundboard vraagt mic-toegang aan via getUserMedia. Geef de WebView
+            // toestemming zodra (en alleen als) de app zelf de RECORD_AUDIO-permissie heeft.
+            override fun onPermissionRequest(request: PermissionRequest) {
+                runOnUiThread {
+                    val wantsAudio = request.resources.any { it == PermissionRequest.RESOURCE_AUDIO_CAPTURE }
+                    if (!wantsAudio) {
+                        request.deny() // andere resources (bv. camera) ondersteunen we niet
+                        return@runOnUiThread
+                    }
+                    if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO)
+                            == PackageManager.PERMISSION_GRANTED) {
+                        request.grant(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+                    } else {
+                        // Nog geen app-permissie → vraag die nu aan; de callback grant/weigert
+                        // deze WebView-request. Een eventuele oude pending request weigeren.
+                        pendingPermissionRequest?.deny()
+                        pendingPermissionRequest = request
+                        micPermission.launch(Manifest.permission.RECORD_AUDIO)
+                    }
+                }
             }
         }
 
@@ -248,6 +337,11 @@ class MainActivity : AppCompatActivity(), PlaybackController {
             pendingPlayUrl?.let { url -> pendingPlayUrl = null; playUrl(url) }
         }, ContextCompat.getMainExecutor(this))
 
+        // Native vorige/volgende knoppen (notificatie, lockscreen, Bluetooth, auto) →
+        // doorgeven aan de frontend-skiplogica via een 'nativeSkip'-event.
+        SkipBridge.onSkipNext = { dispatchNativeSkip("next") }
+        SkipBridge.onSkipPrevious = { dispatchNativeSkip("previous") }
+
         // Push FFT-banden uit ExoPlayer naar de WebView voor de visualizer
         FftAudioProcessor.onBands = { bands ->
             val json = bands.joinToString(",", "[", "]")
@@ -265,6 +359,8 @@ class MainActivity : AppCompatActivity(), PlaybackController {
     override fun onStop() {
         super.onStop()
         castContext?.sessionManager?.removeSessionManagerListener(castSessionListener, CastSession::class.java)
+        SkipBridge.onSkipNext = null
+        SkipBridge.onSkipPrevious = null
         FftAudioProcessor.onBands = null
         mediaController?.removeListener(playerListener)
         controllerFuture?.let { MediaController.releaseFuture(it) }
@@ -279,9 +375,9 @@ class MainActivity : AppCompatActivity(), PlaybackController {
             .setMimeType(MimeTypes.AUDIO_MPEG) // nodig zodat CastPlayer de stream accepteert
             .setMediaMetadata(
                 MediaMetadata.Builder()
-                    .setTitle(trackTitle.ifBlank { "KrukkexRadio" })
+                    .setTitle(trackTitle.ifBlank { "KrukkeX Radio" })
                     .setArtist(trackArtist.ifBlank { "Live Radio" })
-                    .setAlbumTitle("KrukkexRadio")
+                    .setAlbumTitle("KrukkeX Radio")
                     .setArtworkUri(trackArtwork.ifBlank { null }?.let { Uri.parse(it) })
                     .build()
             )
@@ -331,7 +427,7 @@ class MainActivity : AppCompatActivity(), PlaybackController {
     }
 
     override fun updateMetadata(title: String, artist: String, artworkUrl: String) = runOnUiThread {
-        trackTitle = title.takeIf { it.isNotBlank() } ?: "KrukkexRadio"
+        trackTitle = title.takeIf { it.isNotBlank() } ?: "KrukkeX Radio"
         trackArtist = artist.takeIf { it.isNotBlank() } ?: ""
         trackArtwork = artworkUrl.takeIf { it.isNotBlank() } ?: ""
         val c = mediaController ?: return@runOnUiThread
@@ -350,7 +446,7 @@ class MainActivity : AppCompatActivity(), PlaybackController {
     }
 
     override fun updateMetadataFull(title: String, artist: String, source: String, artworkUrl: String) = runOnUiThread {
-        trackTitle = title.takeIf { it.isNotBlank() } ?: "KrukkexRadio"
+        trackTitle = title.takeIf { it.isNotBlank() } ?: "KrukkeX Radio"
         trackArtist = artist.takeIf { it.isNotBlank() } ?: ""
         trackArtwork = artworkUrl.takeIf { it.isNotBlank() } ?: ""
         val c = mediaController ?: return@runOnUiThread
@@ -374,13 +470,26 @@ class MainActivity : AppCompatActivity(), PlaybackController {
             .setMimeType(MimeTypes.AUDIO_MPEG) // nodig zodat CastPlayer de stream accepteert
             .setMediaMetadata(
                 MediaMetadata.Builder()
-                    .setTitle(trackTitle.ifBlank { "KrukkexRadio" })
+                    .setTitle(trackTitle.ifBlank { "KrukkeX Radio" })
                     .setArtist(trackArtist.ifBlank { "Live Radio" })
-                    .setAlbumTitle(source.ifBlank { "KrukkexRadio" })
+                    .setAlbumTitle(source.ifBlank { "KrukkeX Radio" })
                     .setArtworkUri(trackArtwork.ifBlank { null }?.let { Uri.parse(it) })
                     .build()
             )
             .build()
+
+    // Open het systeem-instellingenscherm van deze app (voor permanent geweigerde mic).
+    private fun openAppSettings() {
+        try {
+            startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.fromParts("package", packageName, null))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        } catch (e: Exception) {
+            Log.w("Mic", "Kon app-instellingen niet openen: ${e.message}")
+        }
+    }
 
     private fun handleNativeScheme(uri: Uri) {
         when (uri.host?.lowercase()) {

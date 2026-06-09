@@ -12,7 +12,9 @@ import androidx.media3.cast.DefaultMediaItemConverter
 import androidx.media3.cast.MediaItemConverter
 import androidx.media3.cast.SessionAvailabilityListener
 import androidx.media3.common.AudioAttributes
+import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -25,6 +27,17 @@ import androidx.media3.session.MediaSessionService
 import com.google.android.gms.cast.MediaInfo
 import com.google.android.gms.cast.MediaQueueItem
 import com.google.android.gms.cast.framework.CastContext
+
+/**
+ * Brug voor de native vorige/volgende knoppen (notificatie, lockscreen, Bluetooth, auto).
+ * De ForwardingPlayer in de service vangt seekToNext/Previous af en roept deze callbacks
+ * aan; MainActivity registreert ze en stuurt het door naar de WebView (frontend-skiplogica).
+ * Zelfde proces als MainActivity, dus een statische bridge volstaat (zoals FftAudioProcessor).
+ */
+object SkipBridge {
+    @Volatile var onSkipNext: (() -> Unit)? = null
+    @Volatile var onSkipPrevious: (() -> Unit)? = null
+}
 
 /**
  * Pure Media3 MediaSessionService. De service zelf bevat geen play/pause-logica meer:
@@ -87,8 +100,12 @@ class AudioService : MediaSessionService() {
                 enableFloatOutput: Boolean,
                 enableAudioTrackPlaybackParams: Boolean
             ): AudioSink {
+                // Forceer 16-bit PCM (geen float output): onze FftAudioProcessor doet
+                // visualizer-FFT én EQ alleen op het 16-bit pad. Bij een float-sink zou
+                // de EQ stil worden overgeslagen. De bron is een MP3-stream (intern al
+                // 16-bit-equivalent), dus dit kost geen hoorbare kwaliteit.
                 return DefaultAudioSink.Builder(context)
-                    .setEnableFloatOutput(enableFloatOutput)
+                    .setEnableFloatOutput(false)
                     .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
                     .setAudioProcessors(arrayOf(FftAudioProcessor()))
                     .build()
@@ -116,9 +133,22 @@ class AudioService : MediaSessionService() {
                     player.prepare()
                 }
             }
+
+            // Houd de startscherm-widget in sync met track + afspeelstatus.
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                pushWidgetState(player.mediaMetadata, isPlaying)
+            }
+
+            override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
+                pushWidgetState(mediaMetadata, player.isPlaying)
+            }
         })
 
-        mediaSession = MediaSession.Builder(this, player)
+        // Wrap de speler zodat de native vorige/volgende knoppen verschijnen en hun druk
+        // wordt doorgegeven aan de frontend-skiplogica (i.p.v. echt te seeken).
+        val sessionPlayer = withSkip(player)
+
+        mediaSession = MediaSession.Builder(this, sessionPlayer)
             .setSessionActivity(
                 PendingIntent.getActivity(
                     this, 0,
@@ -135,18 +165,20 @@ class AudioService : MediaSessionService() {
         try {
             val ctx = CastContext.getSharedInstance(this)
             val cast = CastPlayer(ctx, liveMediaItemConverter)
+            // Ook bij casten de skip-knoppen actief houden.
+            val castSessionPlayer = withSkip(cast)
             cast.setSessionAvailabilityListener(object : SessionAvailabilityListener {
                 override fun onCastSessionAvailable() {
-                    setCurrentPlayer(cast)
+                    setCurrentPlayer(castSessionPlayer)
                 }
 
                 override fun onCastSessionUnavailable() {
-                    setCurrentPlayer(player)
+                    setCurrentPlayer(sessionPlayer)
                 }
             })
             castPlayer = cast
             // Als de app start terwijl er al gecast wordt, meteen overschakelen.
-            if (cast.isCastSessionAvailable) setCurrentPlayer(cast)
+            if (cast.isCastSessionAvailable) setCurrentPlayer(castSessionPlayer)
         } catch (e: Exception) {
             android.util.Log.w("Cast", "CastPlayer niet beschikbaar: ${e.message}")
         }
@@ -178,6 +210,46 @@ class AudioService : MediaSessionService() {
             player.playWhenReady = playWhenReady
             player.prepare()
         }
+    }
+
+    /**
+     * Wrap een speler zodat de standaard vorige/volgende transport-commando's altijd
+     * beschikbaar zijn (zo tonen notificatie, lockscreen, Bluetooth-headset en auto de
+     * knoppen, ook al is het een live-stream met één item). De druk wordt niet als seek
+     * uitgevoerd maar doorgegeven aan de frontend-skiplogica via [SkipBridge].
+     */
+    private fun withSkip(delegate: Player): Player = object : ForwardingPlayer(delegate) {
+        override fun getAvailableCommands(): Player.Commands =
+            super.getAvailableCommands().buildUpon()
+                .add(Player.COMMAND_SEEK_TO_NEXT)
+                .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                .add(Player.COMMAND_SEEK_TO_PREVIOUS)
+                .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+                .build()
+
+        override fun isCommandAvailable(command: Int): Boolean = when (command) {
+            Player.COMMAND_SEEK_TO_NEXT,
+            Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
+            Player.COMMAND_SEEK_TO_PREVIOUS,
+            Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> true
+            else -> super.isCommandAvailable(command)
+        }
+
+        override fun seekToNext() { SkipBridge.onSkipNext?.invoke() }
+        override fun seekToNextMediaItem() { SkipBridge.onSkipNext?.invoke() }
+        override fun seekToPrevious() { SkipBridge.onSkipPrevious?.invoke() }
+        override fun seekToPreviousMediaItem() { SkipBridge.onSkipPrevious?.invoke() }
+    }
+
+    // Duw de huidige now-playing-info naar de startscherm-widget(s).
+    private fun pushWidgetState(metadata: MediaMetadata, isPlaying: Boolean) {
+        WidgetRenderer.pushState(
+            this,
+            metadata.title?.toString() ?: "",
+            metadata.artist?.toString() ?: "",
+            metadata.artworkUri?.toString() ?: "",
+            isPlaying
+        )
     }
 
     private fun registerNetworkCallback(player: ExoPlayer) {

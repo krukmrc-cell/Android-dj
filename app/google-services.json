@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "869470181356",
+    "project_id": "krukkex-radio-25b7e",
+    "storage_bucket": "krukkex-radio-25b7e.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:869470181356:android:f685c8e8e061da1682d2c9",
+        "android_client_info": {
+          "package_name": "com.krukkex.radio"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA8TEh4ofgCr5JDvWkj73jcjviOFUC3-lc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:869470181356:android:662fb0a8f6e134f682d2c9",
+        "android_client_info": {
+          "package_name": "com.krukkex.radio.debug"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA8TEh4ofgCr5JDvWkj73jcjviOFUC3-lc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
